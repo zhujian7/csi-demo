@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: csi-demo-node
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: csi-demo-node
+  template:
+    metadata:
+      labels:
+        app: csi-demo-node
+    spec:
+      serviceAccountName: csi-demo-node
+      hostNetwork: true
+      containers:
+        - name: node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.12.0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/csi.demo.cubestack.io/csi.sock
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+
+        - name: csi-demo
+          image: csi-demo:dev
+          imagePullPolicy: Never
+          env:
+          - name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+          args:
+            - --mode=node
+            - --endpoint=unix:///csi/csi.sock
+            - --volume-root=/var/lib/csi-demo
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: pods-mount-dir
+              mountPath: /var/lib/kubelet/pods
+              mountPropagation: Bidirectional
+            - name: volume-root
+              mountPath: /var/lib/csi-demo
+              mountPropagation: Bidirectional
+
+      volumes:
+        - name: plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/csi.demo.cubestack.io
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
+        - name: pods-mount-dir
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: Directory
+        - name: volume-root
+          hostPath:
+            path: /var/lib/csi-demo
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: csi-demo-node
+  namespace: kube-system
