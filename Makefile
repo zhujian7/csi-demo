@@ -28,6 +28,7 @@ cluster-delete: ## Delete the dedicated kind cluster
 deploy: ## Build, load the image into kind, and apply manifests
 	$(MAKE) image
 	kind load docker-image $(IMAGE) --name $(CLUSTER)
+	kubectl apply -f deploy/csidriver.yaml
 	kubectl apply -f deploy/node.yaml
 
 clean:

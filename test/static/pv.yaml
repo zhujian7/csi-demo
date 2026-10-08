@@ -1,0 +1,22 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: csi-demo-static
+provisioner: csi.demo.cubestack.io
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: csi-demo-static
+spec:
+  accessModes:
+    - ReadWriteOnce
+  capacity:
+    storage: 1Gi
+  csi:
+    driver: csi.demo.cubestack.io
+    volumeHandle: static-volume-1
+  storageClassName: csi-demo-static
+  volumeMode: Filesystem

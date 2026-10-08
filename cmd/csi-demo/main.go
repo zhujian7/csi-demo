@@ -10,6 +10,7 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc"
 
+	"github.com/zhujian7/csi-demo/internal/backend"
 	"github.com/zhujian7/csi-demo/internal/driver"
 )
 
@@ -44,7 +45,7 @@ func main() {
 			csi.RegisterIdentityServer(s, identity)
 		}
 	case "node":
-		node, err := driver.NewNodeServer()
+		node, err := driver.NewNodeServer(backend.NewLocalDir(*volumeRoot))
 		if err != nil {
 			log.Fatalf("create node server: %v", err)
 		}
