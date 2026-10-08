@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/zhujian7/csi-demo/internal/backend"
+	"github.com/zhujian7/csi-demo/internal/mountutil"
 )
 
 // NodeServer runs on every node and does the local work kubelet asks for:
@@ -99,7 +100,8 @@ func (s *NodeServer) NodePublishVolume(_ context.Context, req *csi.NodePublishVo
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "resolve mount source for volume %s: %v", req.GetVolumeId(), err)
 	}
-	if err := bindMount(source, req.GetTargetPath(), req.GetReadonly()); err != nil {
+	// if err := bindMount(source, req.GetTargetPath(), req.GetReadonly()); err != nil {
+	if err := mountutil.BindMount(source, req.GetTargetPath(), req.GetReadonly()); err != nil {
 		return nil, status.Errorf(codes.Internal, "bind mount %s at %s: %v", source, req.GetTargetPath(), err)
 	}
 	return &csi.NodePublishVolumeResponse{}, nil
@@ -113,7 +115,8 @@ func (s *NodeServer) NodeUnpublishVolume(_ context.Context, req *csi.NodeUnpubli
 		return nil, status.Error(codes.InvalidArgument, "target path is required")
 	}
 
-	if err := unmount(req.GetTargetPath()); err != nil {
+	// if err := unmount(req.GetTargetPath()); err != nil {
+	if err := mountutil.Unmount(req.GetTargetPath()); err != nil {
 		return nil, status.Errorf(codes.Internal, "unmount %s: %v", req.GetTargetPath(), err)
 	}
 	// kubelet expects the target path to be gone so a later publish starts clean.

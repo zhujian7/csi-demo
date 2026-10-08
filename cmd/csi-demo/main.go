@@ -21,9 +21,10 @@ const (
 
 func main() {
 	var (
-		mode       = flag.String("mode", "", "run mode: controller or node")
-		endpoint   = flag.String("endpoint", "unix:///csi/csi.sock", "CSI endpoint")
-		volumeRoot = flag.String("volume-root", "/var/lib/csi-demo", "host directory holding volume data")
+		mode        = flag.String("mode", "", "run mode: controller or node")
+		endpoint    = flag.String("endpoint", "unix:///csi/csi.sock", "CSI endpoint")
+		volumeRoot  = flag.String("volume-root", "/var/lib/csi-demo", "host directory holding volume data")
+		backendKind = flag.String("backend", "loop", "volume backend: dir or loop")
 	)
 	flag.Parse()
 
@@ -45,7 +46,11 @@ func main() {
 			csi.RegisterIdentityServer(s, identity)
 		}
 	case "node":
-		node, err := driver.NewNodeServer(backend.NewLocalDir(*volumeRoot))
+		be, err := newBackend(*backendKind, *volumeRoot)
+		if err != nil {
+			log.Fatalf("create backend: %v", err)
+		}
+		node, err := driver.NewNodeServer(be)
 		if err != nil {
 			log.Fatalf("create node server: %v", err)
 		}
@@ -59,5 +64,16 @@ func main() {
 	if err := driver.Serve(socketPath, register); err != nil {
 		fmt.Fprintf(os.Stderr, "server exited: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+func newBackend(kind, root string) (backend.Backend, error) {
+	switch kind {
+	case "dir":
+		return backend.NewLocalDir(root), nil
+	case "loop":
+		return backend.NewLoopDev(root), nil
+	default:
+		return nil, fmt.Errorf("unknown backend %q, want dir or loop", kind)
 	}
 }
