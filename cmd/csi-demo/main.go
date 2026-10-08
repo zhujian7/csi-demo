@@ -42,8 +42,13 @@ func main() {
 	var register func(*grpc.Server)
 	switch *mode {
 	case "controller":
+		be, err := newBackend(*backendKind, *volumeRoot)
+		if err != nil {
+			log.Fatalf("create backend: %v", err)
+		}
 		register = func(s *grpc.Server) {
 			csi.RegisterIdentityServer(s, identity)
+			csi.RegisterControllerServer(s, driver.NewControllerServer(be))
 		}
 	case "node":
 		be, err := newBackend(*backendKind, *volumeRoot)

@@ -28,8 +28,17 @@ cluster-delete: ## Delete the dedicated kind cluster
 deploy: ## Build, load the image into kind, and apply manifests
 	$(MAKE) image
 	kind load docker-image $(IMAGE) --name $(CLUSTER)
+	kubectl apply -f deploy/storageclass.yaml
 	kubectl apply -f deploy/csidriver.yaml
+	kubectl apply -f deploy/controller.yaml
 	kubectl apply -f deploy/node.yaml
+    # Loading a new image under the same tag does not restart running pods, and
+    # kubectl apply is a no-op when a manifest is unchanged — without these the
+    # old binary keeps serving and you debug a fix that was never deployed.
+	kubectl -n kube-system rollout restart deployment/csi-demo-controller
+	kubectl -n kube-system rollout restart daemonset/csi-demo-node
+	kubectl -n kube-system rollout status deployment/csi-demo-controller --timeout=180s
+	kubectl -n kube-system rollout status daemonset/csi-demo-node --timeout=180s
 
 clean:
 	rm -rf bin
