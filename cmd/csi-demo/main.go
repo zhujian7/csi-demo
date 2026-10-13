@@ -28,8 +28,8 @@ func main() {
 	)
 	flag.Parse()
 
-	if *mode != "controller" && *mode != "node" {
-		log.Fatalf("--mode must be controller or node, got %q", *mode)
+	if *mode != "controller" && *mode != "node" && *mode != "all" {
+		log.Fatalf("--mode must be controller, node or all, got %q", *mode)
 	}
 
 	// The CSI endpoint convention is unix://<path>; net.Listen wants the bare path.
@@ -61,6 +61,21 @@ func main() {
 		}
 		register = func(s *grpc.Server) {
 			csi.RegisterIdentityServer(s, identity)
+			csi.RegisterNodeServer(s, node)
+		}
+	case "all":
+		// csi-sanity drives every service through a single endpoint.
+		be, err := newBackend(*backendKind, *volumeRoot)
+		if err != nil {
+			log.Fatalf("create backend: %v", err)
+		}
+		node, err := driver.NewNodeServer(be)
+		if err != nil {
+			log.Fatalf("create node server: %v", err)
+		}
+		register = func(s *grpc.Server) {
+			csi.RegisterIdentityServer(s, identity)
+			csi.RegisterControllerServer(s, driver.NewControllerServer(be))
 			csi.RegisterNodeServer(s, node)
 		}
 	}

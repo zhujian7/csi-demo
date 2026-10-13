@@ -10,6 +10,9 @@ import (
 	"github.com/zhujian7/csi-demo/internal/backend"
 )
 
+// minimumVolumeBytes is what a volume gets when the caller states no size.
+const minimumVolumeBytes = 64 << 20
+
 // ControllerServer runs cluster-wide. It decides that a volume should exist
 // and mints the handle that identifies it from then on; the per-node work of
 // making it usable happens in NodeServer.
@@ -48,6 +51,10 @@ func (s *ControllerServer) CreateVolume(_ context.Context, req *csi.CreateVolume
 	}
 	if err := validateCapabilities(req.GetVolumeCapabilities()); err != nil {
 		return nil, err
+	}
+	if limit := req.GetCapacityRange().GetLimitBytes(); limit > 0 && limit < req.GetCapacityRange().GetRequiredBytes() {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"capacity range limit %d is smaller than required %d", limit, req.GetCapacityRange().GetRequiredBytes())
 	}
 
 	capacity := requestedBytes(req.GetCapacityRange())
@@ -103,11 +110,18 @@ func (s *ControllerServer) ValidateVolumeCapabilities(_ context.Context, req *cs
 		return nil, status.Errorf(codes.NotFound, "volume %s not found", req.GetVolumeId())
 	}
 
-	// An unsupported capability is a negative answer, not an error: the caller
-	// asked a question and the answer is no.
+	// volume_capabilities is required: an empty list is a malformed request, and
+	// answering "not supported" would hide that from the caller.
+	if len(req.GetVolumeCapabilities()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "at least one volume capability is required")
+	}
+
+	// A well-formed capability this driver does not serve is a negative answer,
+	// not an error: the caller asked a question and the answer is no.
 	if err := validateCapabilities(req.GetVolumeCapabilities()); err != nil {
 		return &csi.ValidateVolumeCapabilitiesResponse{}, nil
 	}
+
 	return &csi.ValidateVolumeCapabilitiesResponse{
 		Confirmed: &csi.ValidateVolumeCapabilitiesResponse_Confirmed{
 			VolumeCapabilities: req.GetVolumeCapabilities(),
@@ -124,13 +138,24 @@ func createVolumeResponse(vol *backend.Volume) *csi.CreateVolumeResponse {
 	}
 }
 
-// requestedBytes picks the size to provision. A caller may give only a limit,
-// and a PVC with no size at all leaves both zero.
+// requestedBytes picks the size to provision and keeps it inside the range the
+// caller allowed: at least required, never above limit, and at least
+// minimumVolumeBytes so a caller that states no size still gets a usable volume.
 func requestedBytes(capacityRange *csi.CapacityRange) int64 {
-	if required := capacityRange.GetRequiredBytes(); required > 0 {
-		return required
+	required := capacityRange.GetRequiredBytes()
+	limit := capacityRange.GetLimitBytes()
+
+	size := required
+	if size <= 0 {
+		size = limit
 	}
-	return capacityRange.GetLimitBytes()
+	if size < minimumVolumeBytes {
+		size = minimumVolumeBytes
+	}
+	if limit > 0 && size > limit {
+		size = limit
+	}
+	return size
 }
 
 func validateCapabilities(caps []*csi.VolumeCapability) error {

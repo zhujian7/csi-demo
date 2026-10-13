@@ -127,8 +127,9 @@ func (s *NodeServer) NodeUnpublishVolume(_ context.Context, req *csi.NodeUnpubli
 }
 
 // validateMountCapability rejects what this driver does not serve. kubelet
-// passes the capability through from the PV, so a block volume or a missing
-// access mode has to fail loudly here rather than mount something wrong.
+// passes the capability through from the PV, so a block volume or an
+// unspecified access mode has to fail loudly here rather than mount something
+// wrong.
 func validateMountCapability(cap *csi.VolumeCapability) error {
 	if cap == nil {
 		return status.Error(codes.InvalidArgument, "volume capability is required")
@@ -136,8 +137,12 @@ func validateMountCapability(cap *csi.VolumeCapability) error {
 	if cap.GetMount() == nil {
 		return status.Error(codes.InvalidArgument, "only mount volumes are supported, not block")
 	}
-	if cap.GetAccessMode() == nil {
+	mode := cap.GetAccessMode()
+	if mode == nil {
 		return status.Error(codes.InvalidArgument, "access mode is required")
+	}
+	if mode.GetMode() == csi.VolumeCapability_AccessMode_UNKNOWN {
+		return status.Error(codes.InvalidArgument, "access mode UNKNOWN is not supported")
 	}
 	return nil
 }

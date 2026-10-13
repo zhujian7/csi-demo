@@ -42,3 +42,6 @@ deploy: ## Build, load the image into kind, and apply manifests
 
 clean:
 	rm -rf bin
+
+sanity: build ## Run the CSI conformance suite (needs root)
+	sudo ./hack/run-sanity.sh
