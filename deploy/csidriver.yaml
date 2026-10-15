@@ -8,7 +8,7 @@ spec:
   # and the attach-detach controller waits for an external-attacher that does
   # not exist, failing the pod with:
   #   FailedAttachVolume: timed out waiting for external-attacher of ...
-  attachRequired: false
+  attachRequired: true
   # The pod's identity is not needed in the volume context.
   podInfoOnMount: false
   # Only PV/PVC-backed volumes; no inline ephemeral volumes.

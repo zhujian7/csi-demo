@@ -165,3 +165,56 @@ func TestControllerGetCapabilitiesAdvertisesCreateDelete(t *testing.T) {
 		t.Error("CREATE_DELETE_VOLUME capability not advertised")
 	}
 }
+
+func TestControllerGetCapabilitiesAdvertisesPublishUnpublish(t *testing.T) {
+	resp, err := newTestControllerServer(t).ControllerGetCapabilities(context.Background(), &csi.ControllerGetCapabilitiesRequest{})
+	if err != nil {
+		t.Fatalf("ControllerGetCapabilities: %v", err)
+	}
+	var found bool
+	for _, c := range resp.GetCapabilities() {
+		if c.GetRpc().GetType() == csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("PUBLISH_UNPUBLISH_VOLUME capability not advertised")
+	}
+}
+
+func TestControllerPublishVolumeIsIdempotent(t *testing.T) {
+	s := newTestControllerServer(t)
+
+	created, err := s.CreateVolume(context.Background(), createRequest("my-pvc", 1<<30))
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	req := &csi.ControllerPublishVolumeRequest{
+		VolumeId:         created.GetVolume().GetVolumeId(),
+		NodeId:           "worker-1",
+		VolumeCapability: mountCapability(),
+	}
+
+	first, err := s.ControllerPublishVolume(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first ControllerPublishVolume: %v", err)
+	}
+	second, err := s.ControllerPublishVolume(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second ControllerPublishVolume: %v", err)
+	}
+	if first.GetPublishContext()["devicePath"] != second.GetPublishContext()["devicePath"] {
+		t.Error("retry returned a different publish context")
+	}
+}
+
+func TestControllerPublishVolumeReportsUnknownVolume(t *testing.T) {
+	_, err := newTestControllerServer(t).ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{
+		VolumeId:         "no-such-volume",
+		NodeId:           "worker-1",
+		VolumeCapability: mountCapability(),
+	})
+	if status.Code(err) != codes.NotFound {
+		t.Errorf("got %v, want NotFound", err)
+	}
+}

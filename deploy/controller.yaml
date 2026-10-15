@@ -27,6 +27,12 @@ rules:
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, list, watch, create, update, delete]
+  - apiGroups: [storage.k8s.io]
+    resources: [volumeattachments]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [storage.k8s.io]
+    resources: [volumeattachments/status]
+    verbs: [patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -68,7 +74,15 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
-
+        - name: csi-attacher
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.7.0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --leader-election=false
+            - --v=5
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
         - name: csi-demo
           image: csi-demo:dev
           imagePullPolicy: Never

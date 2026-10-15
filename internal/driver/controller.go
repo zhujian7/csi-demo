@@ -2,6 +2,7 @@ package driver
 
 import (
 	"context"
+	"path/filepath"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -38,6 +39,13 @@ func (s *ControllerServer) ControllerGetCapabilities(_ context.Context,
 				Type: &csi.ControllerServiceCapability_Rpc{
 					Rpc: &csi.ControllerServiceCapability_RPC{
 						Type: csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
+					},
+				},
+			},
+			{
+				Type: &csi.ControllerServiceCapability_Rpc{
+					Rpc: &csi.ControllerServiceCapability_RPC{
+						Type: csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME,
 					},
 				},
 			},
@@ -168,4 +176,42 @@ func validateCapabilities(caps []*csi.VolumeCapability) error {
 		}
 	}
 	return nil
+}
+
+// ControllerPublishVolume is the cluster-wide "attach" step. A node cannot do
+// this alone: two nodes disagreeing about who owns a device is how
+// filesystems get corrupted, so one component has to arbitrate. Here the
+// backend is node-local and nothing actually needs attaching, so the work is
+// bookkeeping — but this is where a real driver would call the storage API.
+func (s *ControllerServer) ControllerPublishVolume(_ context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
+	if req.GetVolumeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume id is required")
+	}
+	if req.GetNodeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "node id is required")
+	}
+	if err := validateMountCapability(req.GetVolumeCapability()); err != nil {
+		return nil, err
+	}
+
+	vol, err := s.backend.FindByID(req.GetVolumeId())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "look up volume %s: %v", req.GetVolumeId(), err)
+	}
+	if vol == nil {
+		return nil, status.Errorf(codes.NotFound, "volume %s not found", req.GetVolumeId())
+	}
+
+	return &csi.ControllerPublishVolumeResponse{
+		PublishContext: map[string]string{
+			"devicePath": filepath.Join("/var/lib/csi-demo", vol.ID, "backing.img"),
+		},
+	}, nil
+}
+
+func (s *ControllerServer) ControllerUnpublishVolume(_ context.Context, req *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
+	if req.GetVolumeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume id is required")
+	}
+	return &csi.ControllerUnpublishVolumeResponse{}, nil
 }
