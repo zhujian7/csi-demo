@@ -441,7 +441,183 @@ volumeMounts:
 
 ---
 
-## 6. 后端的分类学：拿到任何存储，怎么推 driver 形态
+## 6. 端到端实例：一块云盘的四个阶段
+
+第 5 节讲「字节怎么到达容器」，但没有区分后端。这一节跟着一块云盘走完全程，重点看**哪些阶段根本没有 Linux 命令**。
+
+### 6.1 场景
+
+一块 20 GiB 云盘（EBS 型），PVC 已 Bound，Pod 被调度到 `worker-2`（云上实例 `i-0def456abc`）。
+
+### 6.2 阶段 1：`CreateVolume` —— 没有 Linux 命令
+
+```bash
+aws ec2 create-volume \
+  --availability-zone eu-west-1a \
+  --size 20 --volume-type gp3
+# → vol-0abc123def456
+```
+
+（真实 driver 用 SDK，这里用 CLI 只是为了看得见。）
+
+**它在云端凭空造出一块盘，谁也没连上它。** 任何节点的内核都不知道它存在——`lsblk` 看不到。
+
+`--availability-zone` 是必填的：**云盘诞生在一个可用区里，之后只能接给同可用区的实例。** 这就是「拓扑」的由来，也是 `WaitForFirstConsumer` 存在的理由——卷带着地理位置，而 Pod 落在哪还不知道。
+
+### 6.3 阶段 2：`ControllerPublishVolume` —— 也没有 Linux 命令
+
+```bash
+aws ec2 attach-volume \
+  --volume-id vol-0abc123def456 \
+  --instance-id i-0def456abc \
+  --device /dev/xvdf
+```
+
+同样是云端操作，**但这次产生了本地副作用**——`worker-2` 的内核自己把设备认了出来，**没有谁敲过任何命令**：
+
+```bash
+# 在 worker-2 上查看（这是自动发生的结果，不是 driver 敲的）
+$ lsblk
+NAME        MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+nvme0n1     259:0    0    8G  0 disk
+└─nvme0n1p1 259:1    0    8G  0 part /
+nvme2n1     259:5    0   20G  0 disk            ← 新来的，还没有文件系统
+
+$ blkid /dev/nvme2n1
+（无输出 —— 设备上什么都没有）
+```
+
+它之所以会自己出现，是因为这台实例的内核里本来就有 EBS / NVMe 客户端。**内核认识这个协议，就不需要用户态翻译**——与第 7 节同一原理，只是层次不同。
+
+设备有两个名字，只能用稳定的那个：
+
+```bash
+# ✗ 编号取决于机器上已有几块盘，换台机器就变
+/dev/nvme2n1
+
+# ✓ 按卷 ID 索引的稳定路径
+$ readlink -f /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol0abc123def456
+/dev/nvme2n1
+```
+
+**`/dev/nvmeXn1` 是不稳定名字，`by-id` 才是稳定名字。** 这也是 `PublishContext` 存在的原因之一：**不是所有云 / 存储都提供 by-id 这类稳定映射**（Ceph RBD 就没有），所以通用做法是 controller 把设备信息随 `PublishContext` 递下来（见 4.3）。
+
+### 6.4 阶段 3：`NodeStageVolume` —— 真的有命令了
+
+在 `worker-2` 上，由 node plugin 容器执行：
+
+```bash
+# ① 定位设备（用稳定路径，并等它出现）
+DEV=$(readlink -f /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol0abc123def456)
+
+# ② 先探测有没有文件系统 —— SafeFormatAndMount 的第一步
+blkid "$DEV"
+#   无输出 ⇒ 新盘，需要格式化
+#   有输出 ⇒ 已有文件系统，跳过 ③（从快照恢复的卷走这条路）
+
+# ③ 格式化（只在 ② 为空时执行）
+mkfs.ext4 -F "$DEV"
+
+# ④ 建 staging 目录并挂载
+STAGE=/var/lib/kubelet/plugins/kubernetes.io/csi/ebs.csi.aws.com/<hash>/globalmount
+mkdir -p "$STAGE"
+mount -t ext4 "$DEV" "$STAGE"
+```
+
+到此这台节点上有了可用的文件系统挂载点，但还没有容器能看到它。
+
+### 6.5 阶段 4：`NodePublishVolume` —— bind mount
+
+```bash
+# ① 建 target 目录
+TARGET=/var/lib/kubelet/pods/<pod-uid>/volumes/kubernetes.io~csi/<pv-name>/mount
+mkdir -p "$TARGET"
+
+# ② bind mount
+mount --bind "$STAGE" "$TARGET"
+
+# ③ 只读卷还要单独 remount
+mount -o remount,bind,ro "$TARGET"
+```
+
+③ 是个真实的坑：`mount --bind -o ro` 在很多内核上不可靠，必须补一次 `remount,bind,ro`。所以 driver 里只读路径会多一步。
+
+### 6.6 全图
+
+```
+        谁也没碰的云端
+   ┌────────────────────────────────────────────┐
+   │  vol-0abc123def456  (20GiB, gp3, eu-west-1a)      │
+   └────────────────────────────────────────────┘
+              ▲                          ▲
+              │ CreateVolume             │ ControllerPublish
+              │ (API，无命令)             │ (API，无命令)
+              │                          │
+      凭空造出一块盘              告诉云「把它接到 i-0def456abc」
+              └──────────┬───────────────┘
+                         │
+                         │  ★ 到这里为止：0 条 Linux 命令
+                         │
+   ┌─ node worker-2 (i-0def456abc) ────────────────────────────┐
+   │                                                           │
+   │   /dev/nvme2n1  ← 内核自动认出来的，没人敲命令             │
+   │        │                                                  │
+   │        │ NodeStageVolume                                  │
+   │        │   blkid（探测）→ mkfs.ext4（必要时）→ mount        │
+   │        ▼                                                  │
+   │   .../plugins/kubernetes.io/csi/.../globalmount           │
+   │        │                                                  │
+   │        │ NodePublishVolume                                │
+   │        │   mkdir → mount --bind → (remount,bind,ro)       │
+   │        ▼                                                  │
+   │   /var/lib/kubelet/pods/<uid>/volumes/.../mount           │
+   └───────────────────────────────────────────────────────────┘
+                         │
+                         ▼
+                   容器里的 /data
+```
+
+### 6.7 汇总
+
+| 阶段 | 在哪执行 | 谁调它 | Linux 命令 | 关键动作 |
+|---|---|---|---|---|
+| `CreateVolume` | **云端** | csi-provisioner | **无** | `create-volume`（需指定 AZ） |
+| `ControllerPublishVolume` | **云端** | csi-attacher | **无**（内核会自动生成设备节点） | `attach-volume` |
+| `NodeStageVolume` | **节点** | kubelet | **有** | `blkid` → `mkfs.ext4` → `mount` |
+| `NodePublishVolume` | **节点** | kubelet | **有** | `mkdir` → `mount --bind` → `remount,ro` |
+
+**两个阶段完全没有 Linux 命令，两个阶段全是 Linux 命令**，分界线正好是「云端 vs 节点」，也就是 Controller service 与 Node service 的分界线。这不是巧合：**Controller 那侧的逻辑是「跟云打交道」，Node 那侧是「跟本地内核打交道」。**
+
+### 6.8 反向拆除
+
+```bash
+# NodeUnpublishVolume
+umount /var/lib/kubelet/pods/<uid>/volumes/kubernetes.io~csi/<pv>/mount
+rmdir  /var/lib/kubelet/pods/<uid>/volumes/kubernetes.io~csi/<pv>/mount
+
+# NodeUnstageVolume
+umount /var/lib/kubelet/plugins/kubernetes.io/csi/ebs.csi.aws.com/<hash>/globalmount
+
+# ControllerUnpublishVolume
+aws ec2 detach-volume --volume-id vol-0abc123def456
+
+# DeleteVolume
+aws ec2 delete-volume --volume-id vol-0abc123def456
+```
+
+注意 **Node 侧先拆、Controller 侧后拆**——挂载是叠上去的，拆必须从最上层开始。这里也能看出前面那条原理的实际后果：`NodeUnstageVolume` 只 umount，**不擦数据**；数据要不要删是 `DeleteVolume` 的事。
+
+### 6.9 三个细节
+
+1. **`/dev/nvme2n1` 是不稳定名字，`/dev/disk/by-id/...` 才是稳定名字。** 设备编号取决于机器上已有几块盘，换台机器就变。凡是靠猜设备名的地方都会在某台机器上翻车。
+2. **`mkfs` 之前必须 `blkid`。** 格式化是破坏性的，而「设备上有没有东西」只能探测得知，不能靠调用次数推断——从快照恢复的卷上来就带着用户数据。
+3. **`mount --bind` 的只读要单独 `remount`。** 一次 `--bind -o ro` 不可靠，这是内核的历史行为。
+
+还有一个前提：这些命令都在 node plugin 容器里执行，而结果必须让宿主机可见——见 5.3 的 `mountPropagation`。缺了它，命令**全部成功**，宿主机却什么都看不到。
+
+---
+
+## 7. 后端的分类学：拿到任何存储，怎么推 driver 形态
 
 ### 6.1 关键问题不是「要不要挂载到节点」
 
@@ -517,7 +693,7 @@ mount -t ceph <mon>:/ /mnt/xxx -o name=...,secret=...
 
 ---
 
-## 7. 规范强制的部分：幂等与错误语义
+## 8. 规范强制的部分：幂等与错误语义
 
 ### 7.1 幂等不是优化，是规范要求
 
@@ -544,11 +720,11 @@ kubelet 退避重试、sidecar 反复 reconcile，**任何方法都可能被用�
 
 - `ControllerGetCapabilities` 缺失 ⇒ **`external-provisioner` 启动即 fatal 退出**，表现为 PVC 永远 `Pending`。
 - `PUBLISH_UNPUBLISH_VOLUME` 未声明 ⇒ attacher 走空转路径，`ControllerPublishVolume` 永不被调。
-- 声明了 `PUBLISH_UNPUBLISH_VOLUME` **不等于**集群会发起 attach —— 那是 `CSIDriver.spec.attachRequired` 的事（见第 9 节）。
+- 声明了 `PUBLISH_UNPUBLISH_VOLUME` **不等于**集群会发起 attach —— 那是 `CSIDriver.spec.attachRequired` 的事（见第 10 节）。
 
 ---
 
-## 8. 排错地图
+## 9. 排错地图
 
 **顺序：对象 → 事件 → 日志。** 日志是过程，对象是结果。
 
@@ -571,7 +747,7 @@ kubelet 退避重试、sidecar 反复 reconcile，**任何方法都可能被用�
 
 ---
 
-## 9. 坑位清单（实测）
+## 10. 坑位清单（实测）
 
 每个坑背后都有一条不可绕过的原理：
 
@@ -596,7 +772,7 @@ kubelet 退避重试、sidecar 反复 reconcile，**任何方法都可能被用�
 
 ---
 
-## 10. 从原理推设计
+## 11. 从原理推设计
 
 拿到一个新后端，填完第 1 节的表，driver 形态就出来了：
 
